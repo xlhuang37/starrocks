@@ -124,6 +124,9 @@ public:
     // Copy metrics from the other work group
     void copy_metrics(const WorkGroup& rhs);
 
+    // Update properties in-place from TWorkGroup (for dynamic weight adjustment)
+    void update_properties(const TWorkGroup& twg);
+
     MemTracker* mem_tracker() { return _mem_tracker.get(); }
 
     std::shared_ptr<MemTracker> grab_mem_tracker() { return _mem_tracker; }
@@ -133,7 +136,7 @@ public:
     int64_t id() const { return _id; }
     int64_t version() const { return _version; }
     const std::string& name() const { return _name; }
-    size_t cpu_weight() const { return _cpu_weight; }
+    size_t cpu_weight() const { return _cpu_weight.load(std::memory_order_relaxed); }
     size_t exclusive_cpu_cores() const { return _exclusive_cpu_cores; }
     double mem_limit() const { return _memory_limit; }
     int64_t mem_limit_bytes() const { return _memory_limit_bytes; }
@@ -233,7 +236,8 @@ private:
     WorkGroupType _type = WorkGroupType::WG_NORMAL;
 
     // Specified limitations
-    size_t _cpu_weight = 1;
+    // Use atomic for thread-safe reads during dynamic weight updates
+    std::atomic<size_t> _cpu_weight{1};
     size_t _exclusive_cpu_cores = 0;
     double _memory_limit = ABSENT_MEMORY_LIMIT;
     int64_t _memory_limit_bytes = -1;
