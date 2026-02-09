@@ -339,7 +339,7 @@ void WorkGroupManager::destroy() {
 
 WorkGroupPtr WorkGroupManager::add_workgroup(const WorkGroupPtr& wg) {
     std::unique_lock write_lock(_mutex);
-
+    auto unique_id = wg->unique_id();
     create_workgroup_unlocked(wg, write_lock);
     if (_workgroup_versions.count(wg->id()) && _workgroup_versions[wg->id()] == wg->version()) {
         auto workgroup_it = _workgroups.find(unique_id);
