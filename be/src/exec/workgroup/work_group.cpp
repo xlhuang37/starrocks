@@ -632,11 +632,7 @@ void WorkGroupManager::alter_workgroup_unlocked(const WorkGroupPtr& wg, UniqueLo
         }
     }
 
-    if (!found) {
-        // Workgroup with this name doesn't exist, create it using the original logic
-        LOG(INFO) << "workgroup not found by name, creating: " << target_name;
-        create_workgroup_unlocked(wg, unique_lock);
-    }
+    create_workgroup_unlocked(wg, unique_lock);
 }
 
 void WorkGroupManager::delete_workgroup_unlocked(const WorkGroupPtr& wg) {
