@@ -340,21 +340,8 @@ void WorkGroupManager::destroy() {
 WorkGroupPtr WorkGroupManager::add_workgroup(const WorkGroupPtr& wg) {
     std::unique_lock write_lock(_mutex);
 
-    // Check if workgroup with this ID already exists (any version)
-    // Return existing shared workgroup to ensure all queries share the same object
-    auto version_it = _workgroup_versions.find(wg->id());
-    if (version_it != _workgroup_versions.end()) {
-        auto existing_unique_id = WorkGroup::create_unique_id(wg->id(), version_it->second);
-        auto wg_it = _workgroups.find(existing_unique_id);
-        if (wg_it != _workgroups.end()) {
-            return wg_it->second;  // Return existing shared workgroup
-        }
-    }
-
-    // Workgroup doesn't exist, create it
     create_workgroup_unlocked(wg, write_lock);
     if (_workgroup_versions.count(wg->id()) && _workgroup_versions[wg->id()] == wg->version()) {
-        auto workgroup_it = _workgroups.find(wg->unique_id());
         if (workgroup_it != _workgroups.end()) {
             return workgroup_it->second;
         }
