@@ -15,6 +15,8 @@
 #include "exec/workgroup/work_group.h"
 
 #include <algorithm>
+#include <chrono>
+#include <fstream>
 #include <utility>
 
 #include "base/time/time.h"
@@ -189,6 +191,13 @@ TWorkGroup WorkGroup::to_thrift() const {
 
 void WorkGroup::update_properties(const TWorkGroup& twg) {
     const int num_cores = CpuInfo::num_cores();
+
+    // #region agent log [Hypothesis D] - Log what TWorkGroup actually contains
+    {
+        std::ofstream dbg("h:/starrocks/.cursor/debug.log", std::ios::app);
+        dbg << "{\"hypothesisId\":\"D\",\"location\":\"work_group.cpp:update_properties:entry\",\"message\":\"TWorkGroup fields\",\"data\":{\"has_cpu_weight_percent\":" << (twg.__isset.cpu_weight_percent ? "true" : "false") << ",\"cpu_weight_percent\":" << (twg.__isset.cpu_weight_percent ? twg.cpu_weight_percent : -1) << ",\"has_cpu_core_limit\":" << (twg.__isset.cpu_core_limit ? "true" : "false") << ",\"cpu_core_limit\":" << (twg.__isset.cpu_core_limit ? twg.cpu_core_limit : -1) << ",\"current_cpu_weight\":" << _cpu_weight.load() << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+    }
+    // #endregion
 
     // Update cpu_weight based on the incoming TWorkGroup
     if (twg.__isset.cpu_weight_percent && twg.cpu_weight_percent > 0) {
@@ -581,6 +590,17 @@ void WorkGroupManager::apply(const std::vector<TWorkGroupOp>& ops) {
     for (const auto& op : ops) {
         auto op_type = op.op_type;
         auto wg = std::make_shared<WorkGroup>(op.workgroup);
+
+        // #region agent log [Hypothesis E] - Log operation type received from FE
+        {
+            std::ofstream dbg("h:/starrocks/.cursor/debug.log", std::ios::app);
+            const char* op_name = (op_type == TWorkGroupOpType::WORKGROUP_OP_CREATE ? "CREATE" :
+                                   op_type == TWorkGroupOpType::WORKGROUP_OP_ALTER ? "ALTER" :
+                                   op_type == TWorkGroupOpType::WORKGROUP_OP_DELETE ? "DELETE" : "UNKNOWN");
+            dbg << "{\"hypothesisId\":\"E\",\"location\":\"work_group.cpp:apply:op_loop\",\"message\":\"received op from FE\",\"data\":{\"op_type\":\"" << op_name << "\",\"wg_name\":\"" << wg->name() << "\",\"wg_id\":" << wg->id() << ",\"wg_cpu_weight\":" << wg->cpu_weight() << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+        }
+        // #endregion
+
         switch (op_type) {
         case TWorkGroupOpType::WORKGROUP_OP_CREATE:
             create_workgroup_unlocked(wg, write_lock);
@@ -650,14 +670,35 @@ void WorkGroupManager::alter_workgroup_unlocked(const WorkGroupPtr& wg, UniqueLo
     const std::string& target_name = wg->name();
     bool found = false;
 
+    // #region agent log [Hypothesis A,C,E] - Log entry with target name and map size
+    {
+        std::ofstream dbg("h:/starrocks/.cursor/debug.log", std::ios::app);
+        dbg << "{\"hypothesisId\":\"A,C,E\",\"location\":\"work_group.cpp:alter_workgroup_unlocked:entry\",\"message\":\"alter called\",\"data\":{\"target_name\":\"" << target_name << "\",\"incoming_cpu_weight\":" << wg->cpu_weight() << ",\"map_size\":" << _workgroups.size() << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+    }
+    // #endregion
+
     // Iterate through all workgroups and update those matching by name
     // This ensures all versions of a workgroup get updated in-place
     for (auto& [unique_id, existing_wg] : _workgroups) {
+        // #region agent log [Hypothesis A] - Log each workgroup name for comparison
+        {
+            std::ofstream dbg("h:/starrocks/.cursor/debug.log", std::ios::app);
+            dbg << "{\"hypothesisId\":\"A\",\"location\":\"work_group.cpp:alter_workgroup_unlocked:loop\",\"message\":\"comparing names\",\"data\":{\"target_name\":\"" << target_name << "\",\"existing_name\":\"" << existing_wg->name() << "\",\"match\":" << (existing_wg->name() == target_name ? "true" : "false") << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+        }
+        // #endregion
+
         if (existing_wg->name() == target_name) {
             // Found a workgroup with matching name - update in-place
             size_t old_weight = existing_wg->cpu_weight();
             existing_wg->update_properties(wg->to_thrift());
             size_t new_weight = existing_wg->cpu_weight();
+
+            // #region agent log [Hypothesis D] - Log weight before/after update
+            {
+                std::ofstream dbg("h:/starrocks/.cursor/debug.log", std::ios::app);
+                dbg << "{\"hypothesisId\":\"D\",\"location\":\"work_group.cpp:alter_workgroup_unlocked:after_update\",\"message\":\"weight update result\",\"data\":{\"old_weight\":" << old_weight << ",\"new_weight\":" << new_weight << ",\"incoming_wg_weight\":" << wg->cpu_weight() << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+            }
+            // #endregion
 
             // Update sum_cpu_weight to reflect the change
             _sum_cpu_weight = _sum_cpu_weight - old_weight + new_weight;
@@ -672,6 +713,12 @@ void WorkGroupManager::alter_workgroup_unlocked(const WorkGroupPtr& wg, UniqueLo
     }
 
     if (!found) {
+        // #region agent log [Hypothesis A,C] - No match found
+        {
+            std::ofstream dbg("h:/starrocks/.cursor/debug.log", std::ios::app);
+            dbg << "{\"hypothesisId\":\"A,C\",\"location\":\"work_group.cpp:alter_workgroup_unlocked:not_found\",\"message\":\"no matching workgroup\",\"data\":{\"target_name\":\"" << target_name << "\"},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+        }
+        // #endregion
         // Workgroup with this name doesn't exist, create it using the original logic
         LOG(INFO) << "workgroup not found by name, creating: " << target_name;
         create_workgroup_unlocked(wg, unique_lock);
