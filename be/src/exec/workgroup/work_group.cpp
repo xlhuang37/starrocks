@@ -187,45 +187,6 @@ TWorkGroup WorkGroup::to_thrift() const {
     return twg;
 }
 
-void WorkGroup::update_properties(const TWorkGroup& twg) {
-    const int num_cores = CpuInfo::num_cores();
-
-    // Update cpu_weight based on the incoming TWorkGroup
-    if (twg.__isset.cpu_weight_percent && twg.cpu_weight_percent > 0) {
-        _cpu_weight.store(std::max<size_t>(1, num_cores * twg.cpu_weight_percent / 100), std::memory_order_relaxed);
-    } else if (twg.__isset.cpu_core_limit && twg.cpu_core_limit > 0) {
-        _cpu_weight.store(twg.cpu_core_limit, std::memory_order_relaxed);
-    }
-
-    // Update memory limit if specified
-    if (twg.__isset.mem_limit) {
-        _memory_limit = twg.mem_limit;
-    }
-
-    // Update concurrency limit if specified
-    if (twg.__isset.concurrency_limit) {
-        _concurrency_limit = twg.concurrency_limit;
-    }
-
-    // Update big query limits if specified
-    if (twg.__isset.big_query_mem_limit) {
-        _big_query_mem_limit = twg.big_query_mem_limit;
-    }
-    if (twg.__isset.big_query_scan_rows_limit) {
-        _big_query_scan_rows_limit = twg.big_query_scan_rows_limit;
-    }
-    if (twg.__isset.big_query_cpu_second_limit) {
-        _big_query_cpu_nanos_limit = twg.big_query_cpu_second_limit * NANOS_PER_SEC;
-    }
-
-    // Update spill threshold if specified
-    if (twg.__isset.spill_mem_limit_threshold) {
-        _spill_mem_limit_threshold = twg.spill_mem_limit_threshold;
-    }
-
-    LOG(INFO) << "workgroup properties updated in-place: " << to_string();
-}
-
 void WorkGroup::init(std::shared_ptr<MemTracker>& parent_mem_tracker) {
     if (parent_mem_tracker->type() == MemTrackerType::RESOURCE_GROUP_SHARED_MEMORY_POOL) {
         _memory_limit_bytes = parent_mem_tracker->limit();
@@ -648,16 +609,16 @@ void WorkGroupManager::create_workgroup_unlocked(const WorkGroupPtr& wg, UniqueL
 
 void WorkGroupManager::alter_workgroup_unlocked(const WorkGroupPtr& wg, UniqueLockType& unique_lock) {
     const std::string& target_name = wg->name();
+    const size_t new_weight = wg->cpu_weight();
     bool found = false;
 
     // Iterate through all workgroups and update those matching by name
     // This ensures all versions of a workgroup get updated in-place
     for (auto& [unique_id, existing_wg] : _workgroups) {
         if (existing_wg->name() == target_name) {
-            // Found a workgroup with matching name - update in-place
+            // Found a workgroup with matching name - update cpu_weight directly
             size_t old_weight = existing_wg->cpu_weight();
-            existing_wg->update_properties(wg->to_thrift());
-            size_t new_weight = existing_wg->cpu_weight();
+            existing_wg->set_cpu_weight(new_weight);
 
             // Update sum_cpu_weight to reflect the change
             _sum_cpu_weight = _sum_cpu_weight - old_weight + new_weight;
@@ -671,11 +632,11 @@ void WorkGroupManager::alter_workgroup_unlocked(const WorkGroupPtr& wg, UniqueLo
         }
     }
 
-    // if (!found) {
-    //     // Workgroup with this name doesn't exist, create it using the original logic
-    //     LOG(INFO) << "workgroup not found by name, creating: " << target_name;
-    //     create_workgroup_unlocked(wg, unique_lock);
-    // }
+    if (!found) {
+        // Workgroup with this name doesn't exist, create it using the original logic
+        LOG(INFO) << "workgroup not found by name, creating: " << target_name;
+        create_workgroup_unlocked(wg, unique_lock);
+    }
 }
 
 void WorkGroupManager::delete_workgroup_unlocked(const WorkGroupPtr& wg) {

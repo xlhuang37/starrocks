@@ -124,8 +124,8 @@ public:
     // Copy metrics from the other work group
     void copy_metrics(const WorkGroup& rhs);
 
-    // Update properties in-place from TWorkGroup (for dynamic weight adjustment)
-    void update_properties(const TWorkGroup& twg);
+    // Set cpu_weight directly (for dynamic weight adjustment)
+    void set_cpu_weight(size_t weight) { _cpu_weight.store(weight, std::memory_order_relaxed); }
 
     MemTracker* mem_tracker() { return _mem_tracker.get(); }
 
