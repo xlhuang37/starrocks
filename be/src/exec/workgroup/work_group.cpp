@@ -342,6 +342,7 @@ WorkGroupPtr WorkGroupManager::add_workgroup(const WorkGroupPtr& wg) {
 
     create_workgroup_unlocked(wg, write_lock);
     if (_workgroup_versions.count(wg->id()) && _workgroup_versions[wg->id()] == wg->version()) {
+        auto workgroup_it = _workgroups.find(unique_id);
         if (workgroup_it != _workgroups.end()) {
             return workgroup_it->second;
         }
