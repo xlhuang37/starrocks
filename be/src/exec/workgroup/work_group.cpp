@@ -15,7 +15,9 @@
 #include "exec/workgroup/work_group.h"
 
 #include <algorithm>
+#include <chrono>
 #include <utility>
+#include <vector>
 
 #include "base/time/time.h"
 #include "common/config.h"
@@ -283,6 +285,32 @@ void WorkGroup::copy_metrics(const WorkGroup& rhs) {
 }
 
 // ------------------------------------------------------------------------------------
+// Speedup curves for greedy weight allocation (match scheduler.py)
+// ------------------------------------------------------------------------------------
+
+namespace {
+
+constexpr size_t SPEEDUP_ARRAY_SIZE = 60;
+constexpr size_t DEFAULT_TOTAL_CORES = 60;
+
+// Speedup vs. core count for parallel workloads (index i = i cores).
+const double PARALLEL_SPEEDUP[SPEEDUP_ARRAY_SIZE] = {
+        0.00, 1.00, 1.95, 2.85, 3.71, 4.52, 5.30, 6.05, 6.76, 7.43, 8.08, 8.71, 9.31, 9.88, 10.43, 10.96,
+        11.47, 11.96, 12.44, 12.89, 13.33, 13.76, 14.17, 14.57, 14.95, 15.32, 15.68, 16.03, 16.37, 16.70, 17.01,
+        17.32, 17.62, 17.91, 18.20, 18.47, 18.74, 19.00, 19.25, 19.50, 19.74, 19.97, 20.20, 20.42, 20.64, 20.85,
+        21.06, 21.26, 21.46, 21.65, 21.84, 22.02, 22.20, 22.38, 22.55, 22.72, 22.88, 23.04, 23.20, 23.35, 23.50};
+
+// Speedup vs. core count for non-parallel workloads; flat after a few cores.
+const double NONPARALLEL_SPEEDUP[SPEEDUP_ARRAY_SIZE] = {
+        0.0000, 1.0000, 1.8136, 2.6871, 3.6195, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519,
+        3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519,
+        3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519,
+        3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519,
+        3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519, 3.8519};
+
+} // namespace
+
+// ------------------------------------------------------------------------------------
 // WorkGroupManager
 // ------------------------------------------------------------------------------------
 
@@ -292,10 +320,91 @@ WorkGroupManager::WorkGroupManager(PipelineExecutorSetConfig executors_manager_c
 WorkGroupManager::~WorkGroupManager() = default;
 
 void WorkGroupManager::destroy() {
+    _scheduler_stop.store(true);
+    _scheduler_cv.notify_all();
+    if (_weight_scheduler_thread.joinable()) {
+        _weight_scheduler_thread.join();
+    }
     std::unique_lock write_lock(_mutex);
 
     update_metrics_unlocked();
     _workgroups.clear();
+}
+
+void WorkGroupManager::_recompute_weights_unlocked() {
+    WorkGroupPtr parallelizable_wg;
+    WorkGroupPtr nonparallelizable_wg;
+    for (const auto& [_, wg] : _workgroups) {
+        if (wg->name() == "parallelizable") {
+            parallelizable_wg = wg;
+        } else if (wg->name() == "nonparallelizable") {
+            nonparallelizable_wg = wg;
+        }
+    }
+
+    struct Candidate {
+        WorkGroupPtr wg;
+        int64_t running = 0;
+        size_t allocated = 0;
+        const double* speedup = nullptr;
+    };
+    std::vector<Candidate> candidates;
+    if (parallelizable_wg && parallelizable_wg->num_running_queries() > 0) {
+        candidates.push_back({parallelizable_wg, parallelizable_wg->num_running_queries(), 0, PARALLEL_SPEEDUP});
+    }
+    if (nonparallelizable_wg && nonparallelizable_wg->num_running_queries() > 0) {
+        candidates.push_back(
+                {nonparallelizable_wg, nonparallelizable_wg->num_running_queries(), 0, NONPARALLEL_SPEEDUP});
+    }
+
+    if (candidates.empty()) {
+        return;
+    }
+
+    for (size_t core = 0; core < DEFAULT_TOTAL_CORES; ++core) {
+        Candidate* best = nullptr;
+        double best_marginal = 0.0;
+        for (auto& c : candidates) {
+            size_t k = c.allocated / static_cast<size_t>(c.running);
+            if (k >= SPEEDUP_ARRAY_SIZE - 1) {
+                continue;
+            }
+            size_t k1 = std::min(k + 1, SPEEDUP_ARRAY_SIZE - 1);
+            double marginal = c.speedup[k1] - c.speedup[k];
+            if (marginal > best_marginal) {
+                best_marginal = marginal;
+                best = &c;
+            }
+        }
+        if (best == nullptr) {
+            break;
+        }
+        best->allocated += 1;
+    }
+
+    for (auto& c : candidates) {
+        size_t new_weight = std::max<size_t>(1, c.allocated);
+        size_t old_weight = c.wg->cpu_weight();
+        if (new_weight != old_weight) {
+            _sum_cpu_weight -= old_weight;
+            c.wg->set_cpu_weight(new_weight);
+            _sum_cpu_weight += new_weight;
+        }
+    }
+}
+
+void WorkGroupManager::_weight_scheduler_loop() {
+    constexpr auto interval = std::chrono::seconds(1);
+    while (true) {
+        std::unique_lock lock(_scheduler_mutex);
+        if (_scheduler_cv.wait_for(lock, interval, [this] { return _scheduler_stop.load(); })) {
+            break;
+        }
+        lock.unlock();
+
+        std::unique_lock write_lock(_mutex);
+        _recompute_weights_unlocked();
+    }
 }
 
 WorkGroupPtr WorkGroupManager::add_workgroup(const WorkGroupPtr& wg) {
@@ -664,10 +773,21 @@ void WorkGroupManager::for_each_workgroup(const WorkGroupConsumer& consumer) con
 }
 
 Status WorkGroupManager::start() {
-    return _executors_manager.start_shared_executors_unlocked();
+    auto st = _executors_manager.start_shared_executors_unlocked();
+    if (!st.ok()) {
+        return st;
+    }
+    _scheduler_stop.store(false);
+    _weight_scheduler_thread = std::thread(&WorkGroupManager::_weight_scheduler_loop, this);
+    return Status::OK();
 }
 
 void WorkGroupManager::close() {
+    _scheduler_stop.store(true);
+    _scheduler_cv.notify_all();
+    if (_weight_scheduler_thread.joinable()) {
+        _weight_scheduler_thread.join();
+    }
     std::unique_lock write_lock(_mutex);
     _executors_manager.close();
 }

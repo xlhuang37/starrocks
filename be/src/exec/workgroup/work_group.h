@@ -15,9 +15,11 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <thread>
 #include <unordered_map>
 
 #include "exec/pipeline/pipeline_driver_queue.h"
@@ -134,6 +136,7 @@ public:
     int64_t version() const { return _version; }
     const std::string& name() const { return _name; }
     size_t cpu_weight() const { return _cpu_weight; }
+    void set_cpu_weight(size_t weight) { _cpu_weight = weight; }
     size_t exclusive_cpu_cores() const { return _exclusive_cpu_cores; }
     double mem_limit() const { return _memory_limit; }
     int64_t mem_limit_bytes() const { return _memory_limit_bytes; }
@@ -325,6 +328,8 @@ private:
     void add_metrics_unlocked(const WorkGroupPtr& wg, UniqueLockType& unique_lock);
     void update_metrics_unlocked();
     WorkGroupPtr get_default_workgroup_unlocked();
+    void _recompute_weights_unlocked();
+    void _weight_scheduler_loop();
 
 private:
     friend class ExecutorsManager;
@@ -343,6 +348,12 @@ private:
     MemTrackerManager _shared_mem_tracker_manager;
     std::once_flag init_metrics_once_flag;
     std::unordered_map<std::string, WorkGroupMetricsPtr> _wg_metrics;
+
+    // Scheduler thread: recompute cpu_weight for parallelizable/nonparallelizable workgroups every 1s.
+    std::thread _weight_scheduler_thread;
+    std::atomic<bool> _scheduler_stop{false};
+    std::mutex _scheduler_mutex;
+    std::condition_variable _scheduler_cv;
 };
 
 class DefaultWorkGroupInitialization {
